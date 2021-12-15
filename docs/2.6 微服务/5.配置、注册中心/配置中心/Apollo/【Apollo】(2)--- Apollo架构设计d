@@ -1,0 +1,222 @@
+[【Apollo】(2)--- Apollo架构设计](https://www.cnblogs.com/qdhxhz/p/13394182.html)
+
+##  一、整体架构
+
+Apollo整体架构图，已由作者宋顺已经给出:
+
+![img](https://img2020.cnblogs.com/blog/1090617/202007/1090617-20200728215539079-1535962969.jpg)
+
+这幅图所描述的已经很清楚了。下面来具体解释下上面这张图。
+
+#### 1、四个主要模块和核心功能
+
+```
+ConfigService
+```
+
+提供配置的读取、推送等功能，服务对象是Apollo客户端(client)(最终目的就是把配置数据给到我们自己的微服务对象)
+
+```
+Admin Service
+```
+
+提供配置的修改、发布等功能，服务对象是Apollo Portal（管理界面）（简单理解成就是就是用来在配置中心管理界面来添加或者修改配置）
+
+```
+Client( 客户端)
+```
+
+Apollo提供的客户端程序，为应用提供配置获取、实时更新等功能。
+
+域名访问 **Meta Server** 获取 **Config Service** 服务列表（IP+Port），而后直接通过IP+Port访问服务，同时在Client侧会做**负载均衡**、**错误重试**
+
+```
+Portal
+```
+
+提供Web界面供用户管理配置。
+
+Portal通过域名访问 **Meta Server** 获取 **Admin Service** 服务列表（IP+Port），而后直接通过IP+Port访问服务，同时在Portal侧会做 **负载均衡**、**错误重试**
+
+```
+个人理解这四个模块
+```
+
+**ConfigService 和 Client 的配合**
+
+从这里面可以看出我们自己的微服务不是直接和ConfigService打交道的,而是跟Client打交道，Client才是真正和ConfigService打交道来获取最新配置信息。
+
+**Admin Service 和 Portal**
+
+这里分类两个模块就很好理解了，因为管理界面的实现有自己的一套代码，而且管理界面操作的一些权限等信息,只会跟它自己有关系，对于微服务来讲，我只关心有没有配置
+
+这条配置数据，而不会去关心在管理界面上什么用户能够添加配置信息。所以就有Portal对于了两个数据库，一个可以理解是它自己的，存放一些权限等信息，另一部分是和
+
+配置有关的，所以通过 **Admin Service** 存放在 **configDB** 中。
+
+#### 2、三个辅助服务发现模块
+
+为了保证上面四个模块的高可用，所以这里需要三个辅助模块配合。
+
+```
+ Eureka
+```
+
+用于服务发现和注册Config/AdminService注册实例并定期报心跳。
+
+为了简化部署，我们实际上会把Config Service、Eureka和Meta Server三个逻辑角色部署在同一个JVM进程中
+
+官方也有解释为什么我们采用Eureka作为服务注册中心，而不是使用传统的zk、etcd呢？我大致总结了一下，有以下几方面的原因：
+
+1）**它提供了完整的Service Registry和Service Discovery实现**
+
+首先是提供了完整的实现，并且也经受住了Netflix自己的生产环境考验，相对使用起来会比较省心。
+
+2）**和Spring Cloud无缝集成**
+
+我们的项目本身就使用了Spring Cloud和Spring Boot，同时Spring Cloud还有一套非常完善的开源代码来整合Eureka，所以使用起来非常方便。另外，Eureka还支持在
+
+我们应用自身的容器中启动，也就是说我们的应用启动完之后，既充当了Eureka的角色，同时也是服务的提供者。这样就极大的提高了服务的可用性。这一点是我们选择
+
+Eureka而不是zk、etcd等的主要原因，为了提高配置中心的可用性和降低部署复杂度，我们需要尽可能地减少外部依赖。
+
+3）**Open Source**
+
+最后一点是开源，由于代码是开源的，所以非常便于我们了解它的实现原理和排查问题。
+
+```
+MetaServer
+```
+
+Portal通过**域名** 访问 **MetaServer** 获取 **AdminService** 的地址列表。
+
+Client通过域名访问MetaServer获取ConfigService的地址列表。
+
+相当于一个**Eureka Proxy**  逻辑角色，和ConfigService住在一起部署。
+
+```
+NginxLB
+```
+
+和域名系统配合，协助Portal访问MetaServer获取AdminService地址列表。
+
+和域名系统配合，协助Client访问MetaServer获取ConfigService地址列表。
+
+和域名系统配合，协助用户访问Portal进行配置管理。
+
+
+
+##  二、架构剖析
+
+#### 1、Apollo架构V1
+
+如果不考虑分布式微服务架构中的服务发现问题，Apollo的最简架构如下图(来源 杨波)所示：
+
+![img](https://img2020.cnblogs.com/blog/1090617/202007/1090617-20200728215552581-1590566333.jpg)
+
+```
+要点
+```
+
+1、ConfigService是一个独立的微服务，服务于Client进行配置获取。
+
+2、Client和ConfigService保持 **长连接**，通过一种拖拉结合(**push & pull**)的模式，实现配置实时更新的同时，保证配置更新不丢失。
+
+3、AdminService是一个独立的微服务，服务于Portal进行配置管理。Portal通过调用AdminService进行配置管理和发布。
+
+4、ConfigService和AdminService共享ConfigDB，ConfigDB中存放项目在某个环境的配置信息。ConfigService/AdminService/ConfigDB三者在每个环境
+
+(DEV/FAT/UAT/PRO)中都要部署一份。
+
+5、Protal有一个独立的 **PortalDB**，存放用户权限、项目和配置的元数据信息。`Protal只需部署一份`，它可以管理多套环境。
+
+#### 2、Apollo架构V2
+
+为了保证高可用，ConfigService和AdminService都是无状态以集群方式部署的，这个时候就存在一个服务发现问题：Client怎么找到ConfigService？Portal
+
+怎么找到AdminService？为了解决这个问题，Apollo在其架构中引入了Eureka服务注册中心组件，实现微服务间的服务注册和发现，更新后的架构如下图所示：
+
+![img](https://img2020.cnblogs.com/blog/1090617/202007/1090617-20200728215603021-491502845.jpg)
+
+```
+要点
+```
+
+1. Config/AdminService启动后都会注册到**Eureka**服务注册中心，并定期发送保活心跳。
+2. Eureka采用集群方式部署，使用分布式一致性协议保证每个实例的状态最终一致。
+
+#### 3、Apollo架构V3
+
+我们知道Eureka是自带服务发现的Java客户端的，如果Apollo只支持Java客户端接入，不支持其它语言客户端接入的话，那么Client和Portal只需要引入Eureka的Java
+
+客户端，就可以实现服务发现功能。发现目标服务后，通过客户端软负载(SLB，例如Ribbon)就可以路由到目标服务实例。这是一个经典的微服务架构，基于Eureka实现
+
+服务注册发现+客户端Ribbon配合实现软路由，如下图所示：
+
+![img](https://img2020.cnblogs.com/blog/1090617/202007/1090617-20200728215614846-810438014.jpg)
+
+#### 4、Apollo架构V4
+
+在携程，应用场景不仅有Java，还有很多遗留的.Net应用。Apollo的作者也考虑到开源到社区以后，很多客户应用是非Java的。但是Eureka(包括Ribbon软负载)原生仅支持
+
+Java客户端，如果要为多语言开发Eureka/Ribbon客户端，这个工作量很大也不可控。为此，Apollo的作者引入了MetaServer这个角色，它其实是一个Eureka的Proxy，将
+
+Eureka的服务发现接口以更简单明确的HTTP接口的形式暴露出来，方便Client/Protal通过简单的HTTPClient就可以查询到Config/AdminService的地址列表。获取到服务
+
+实例地址列表之后，再以简单的客户端软负载(Client SLB)策略路由定位到目标实例，并发起调用。
+
+现在还有一个问题，MetaServer本身也是无状态以集群方式部署的，那么Client/Protal该如何发现MetaServer呢？一种传统的做法是借助硬件或者软件负载均衡器，例如在
+
+携程采用的是扩展后的NginxLB（也称Software Load Balancer），由运维为MetaServer集群配置一个域名，指向NginxLB集群，NginxLB再对MetaServer进行负载均衡和
+
+流量转发。Client/Portal通过域名+NginxLB间接访问MetaServer集群。
+
+引入MetaServer和NginxLB之后的架构如下图所示：
+
+![img](https://img2020.cnblogs.com/blog/1090617/202007/1090617-20200728215625685-2133165848.jpg)
+
+#### 5、Apollo架构V5
+
+V4版本已经是比较完成的Apollo架构全貌，现在还剩下最后一个环节：Portal也是无状态以集群方式部署的，用户如何发现和访问Portal？答案也是简单的传统做法，
+
+用户通过域名+NginxLB间接访问MetaServer集群。
+
+所以V5版本是包括用户端的最终的Apollo架构全貌，如下图所示：
+
+![img](https://img2020.cnblogs.com/blog/1090617/202007/1090617-20200728215636772-1566420579.jpg)
+
+#### 6、结论
+
+1. 经过我在第三部分的剖析之后，相信大家对Apollo的微服务架构会有更清晰的认识，作为一个思考题，大家再回头看一下第二部分宋顺给出的架构图，现在是否能够理解？
+
+它和我的架构是如何对应的？提示一下，宋顺的视角是一个从上往下的俯视视角，而我的是一个侧面视角。
+
+1. ConfgService/AdminService/Client/Portal是Apollo的四个核心微服务模块，相互协作完成配置中心业务功能，Eureka/MetaServer/NginxLB是辅助微服务之间进行服务
+
+发现的模块。
+
+1. Apollo采用微服务架构设计，架构和部署都有一些复杂，但是每个服务职责单一，易于扩展。另外，Apollo只需要一套Portal就可以集中管理多套环境(DEV/FAT/UAT/PRO)
+
+中的配置，这个是它的架构的一大亮点。。
+
+1. 服务发现是微服务架构的基础，在Apollo的微服务架构中，既采用Eureka注册中心式的服务发现，也采用NginxLB集中Proxy式的服务发现。
+
+
+
+##  三、可用性考虑
+
+上面设计这么复杂就是为了满足高可用，如果不考虑可用性，那么那么的v1图片就可以满足。我们来下最终的架构图为什么能满足高可用。
+
+![img](https://img2020.cnblogs.com/blog/1090617/202007/1090617-20200728215648660-349841493.jpg)
+
+很明显这些模块任何一个挂掉，都能满足服务的可以用性。
+
+
+
+
+
+###   参考
+
+1、Apollo配置中心设计
+
+2、[携程 Apollo 配置中心架构深度剖析](https://www.infoq.cn/article/ctrip-apollo-configuration-center-architecture/)

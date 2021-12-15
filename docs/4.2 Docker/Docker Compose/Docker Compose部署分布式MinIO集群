@@ -1,0 +1,131 @@
+- [基于Docker Compose部署分布式MinIO集群](https://www.cnblogs.com/xiao987334176/p/13256553.html)
+
+
+
+# 一、Minio概述
+
+Minio 是一个基于Go语言的对象存储服务。它实现了大部分亚马逊S3云存储服务接口，可以看做是是S3的开源版本，非常适合于存储大容量非结构化的数据，例如图片、视频、日志文件、备份数据和容器/虚拟机镜像等，而一个对象文件可以是任意大小，从几kb到最大5T不等。区别于分布式存储系统，minio的特色在于简单、轻量级，对开发者友好，认为存储应该是一个开发问题而不是一个运维问题。
+
+
+
+## 存储架构
+
+Minio针对不同应用场景也设置了对应的存储架构：
+
+### 1、单主机，单硬盘模式
+
+![img](https://img2020.cnblogs.com/blog/1341090/202007/1341090-20200706192757070-509032387.png)
+
+该模式下，Minio只在一台服务器上搭建服务，且数据都存在单块磁盘上，该模式存在单点风险，主要用作开发、测试等使用
+
+```
+minio --config-dir ~/tenant1 server --address :9001 /disk1/data/tenant1
+```
+
+### 2、单主机，多硬盘模式
+
+![img](https://img2020.cnblogs.com/blog/1341090/202007/1341090-20200706192959031-1193403962.png)
+
+该模式下，Minio在一台服务器上搭建服务，但数据分散在多块（大于4块）磁盘上，提供了数据上的安全保障
+
+```
+minio --config-dir ~/tenant1 server --address :9001 /disk1/data/tenant1 /disk2/data/tenant1 /disk3/data/tenant1 /disk4/data/enant1
+```
+
+ 
+
+### 3、多主机、多硬盘模式（分布式）
+
+![img](https://img2020.cnblogs.com/blog/1341090/202007/1341090-20200706193204496-1020360665.png)
+
+该模式是Minio服务最常用的架构，通过共享一个access*key和secret*key,在多台（2-32）服务器上搭建服务，且数据分散在多块（大于4块，无上限）磁盘上，提供了较为强大的数据冗余机制（Reed-Solomon纠删码）。
+
+```
+export MINIO_ACCESS_KEY=<TENANT1_ACCESS_KEY>
+export MINIO_SECRET_KEY=<TENANT1_SECRET_KEY>
+minio --config-dir ~/tenant1 server --address :9001 http://192.168.10.11/data/tenant1 http://192.168.10.12/data/tenant1 http://192.168.10.13/data/tenant1 http://192.168.10.14/data/tenant1
+```
+
+## **数据安全**
+
+Minio使用了Reed-Solomon纠删码和校验和来保护数据免受硬件故障和无声数据损坏。
+
+### 1、Reed-Solomon纠删码
+
+纠删码是一种恢复丢失和损坏数据的数学算法， Minio默认采用Reed-Solomon  code将数据拆分成N/2个数据块和N/2个奇偶校验块。这就意味着如果是16块盘，一个对象会被分成8个数据块、8个奇偶校验块，你可以丢失任意8块盘（不管其是存放的数据块还是校验块），你仍可以从剩下的盘中的数据进行恢复。 
+
+ ![img](https://img2020.cnblogs.com/blog/1341090/202007/1341090-20200706193622703-623643995.png)
+
+纠删码的工作原理和RAID或者副本不同，像RAID6可以在损失两块盘的情况下不丢数据，而Minio纠删码可以在丢失一半的盘的情况下，仍可以保证数据安全。 而且Minio纠删码是作用在对象级别，可以一次恢复一个对象，而RAID是作用在卷级别，数据恢复时间很长。  Minio对每个对象单独编码，存储服务一经部署，通常情况下是不需要更换硬盘或者修复。
+
+此外，针对不同应用所需的数据安全级别不同，Minio还提供了存储级别（Storage Class）的配置，调整数据块和校验块的比例，做到对空间的最佳使用。
+
+![img](https://img2020.cnblogs.com/blog/1341090/202007/1341090-20200706193913660-1073277104.png)
+
+ 
+
+比如在将比例调整为14:2后，存储100M的数据占用的空间仅为114M。
+
+### 2、位衰减保护
+
+位衰减又被称为数据腐化Data Rot、无声数据损坏Silent Data  Corruption,是目前硬盘数据的一种严重数据丢失问题。硬盘上的数据可能会神不知鬼不觉就损坏了，也没有什么错误日志。针对这一问题，最新的Minio采用了HighwayHash算法计算校验和来防范位衰减，根据测试结果，其可以实现10GB/s的处理速度。
+
+### 3、文件的修复
+
+得益于Reed-Solomon纠删码，Minio可以更加灵活的对文件进行修复。目前，Minio提供了全量、bucket、文件夹、文件等各个粒度的修复操作： 
+
+![img](https://img2020.cnblogs.com/blog/1341090/202007/1341090-20200706194012758-1824680537.png)
+
+![img](https://img2020.cnblogs.com/blog/1341090/202007/1341090-20200706194027984-1788412509.png)
+
+![img](https://img2020.cnblogs.com/blog/1341090/202007/1341090-20200706194044460-581136680.png)
+
+![img](https://img2020.cnblogs.com/blog/1341090/202007/1341090-20200706194116361-1917074242.png)
+
+相比一般的RAID方式，Minio可以在非常小的粒度下对文件进行修复操作，灵活性有了很大提高。
+
+# 二、Docker Compose部署
+
+中文文档：https://docs.min.io/cn/deploy-minio-on-docker-compose.html
+
+使用Compose文件来配置MinIO服务。 然后，使用单个命令，您可以通过你的配置创建并启动所有分布式MinIO实例。 分布式MinIO实例将部署在同一主机上的多个容器中。 这是建立基于分布式MinIO的开发，测试和分期环境的好方法。
+
+## 环境说明
+
+| 操作系统   | ip地址        | docker版本 | Docker Compose版本 |
+| ---------- | ------------- | ---------- | ------------------ |
+| centos 7.6 | 192.168.31.34 | 19.03.8    | 1.24.1             |
+
+ 
+
+ 
+
+ 
+
+ 
+
+## 运行分布式MinIO
+
+在Docker Compose上部署分布式MinIO,请下载[docker-compose.yaml](https://github.com/minio/minio/blob/master/docs/orchestration/docker-compose/docker-compose.yaml?raw=true)到你的当前工作目录。Docker Compose会pull MinIO Docker Image,所以你不需要手动去下载MinIO binary。然后运行下面的命令
+
+```
+docker-compose pull
+docker-compose up -d
+```
+
+现在每个实例都可以访问，端口从9001到9004，请在浏览器中访问http://127.0.0.1:9001/
+
+### 注意事项
+
+- 默认情况下Docker Compose file使用的是最新版的MinIO server的Docker镜像，你可以修改image tag来拉取指定版本的[MinIO Docker image](https://hub.docker.com/r/minio/minio/).
+
+- 默认情况下会创建4个minio实例，你可以添加更多的MinIO服务（最多总共16个）到你的MinIO Comose deployment。添加一个服务
+
+  - 复制服务定义并适当地更改新服务的名称。
+  - 更新每个服务中的命令部分。
+  - 更新要为新服务公开的端口号。 另外，请确保分配给新服务的端口尚未使用。
+
+  关于分布式MinIO的更多资料，请访问[这里](https://docs.min.io/cn/distributed-minio-quickstart-guide).
+
+- Docker compose file中的MinIO服务使用的端口是9001到9004，这允许多个服务在主机上运行。
+

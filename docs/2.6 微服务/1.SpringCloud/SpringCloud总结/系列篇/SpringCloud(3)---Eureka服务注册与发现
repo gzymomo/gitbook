@@ -1,0 +1,220 @@
+[SpringCloud(3)---Eureka服务注册与发现](https://www.cnblogs.com/qdhxhz/p/9357502.html)
+
+**GitHub地址**：https://github.com/yudiandemingzi/spring-cloud-study
+
+## 一、Eureka概述
+
+####  1、Eureka特点
+
+ （1） Eureka是一个基于REST的服务，用于定位服务，以实现云端中间层服务发现和故障转移。
+
+ （2） Eureka 主管服务注册与发现，在微服务中，以后了这两者，只需要使用服务的标识符（==就是那个在每个服务的yml文件中取得服务名称==），
+
+​     就可以访问到服务，不需要修改服务调用的配置文件。
+
+ （3） Eureka遵循AP原则（高可用，分区容错性），因为使用了自我保护机制所以保证了高可用。
+
+#### 2、Eureka两大组件
+
+  **两大组件**：Eureka Server（提供注册服务）、 Eureka Client（JAVA客户端，负责发送心跳）
+
+  系统中的其他微服务使用Eureka客户端连接到Eureka服务端维持心跳连接（即注册）。SpringCloud的其他模块可以通过Eureka Server 来发现系统中的微服务并加以调用
+
+![img](https://images2018.cnblogs.com/blog/1090617/201807/1090617-20180724214704043-2080813971.png)
+
+#### 3、Eureka三大角色
+
+​       **Eureka Server**：提供服务注册和发现
+
+​    **Service Provider**：服务提供方，将自身服务注册到Eureka，从而使服务消费方能够找到
+
+   **Service Consumer**：服务消费方，从Eureka获取注册服务列表，从而能够消费服务。
+
+ ![img](https://images2018.cnblogs.com/blog/1090617/201807/1090617-20180724220018785-940912807.png)
+
+ 
+
+## 二、**Eureka Server**服务注册中心
+
+####   **1、pom.xml**
+
+```
+<!--注册服务中心的jar要多个-server-->
+<dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-eureka-server</artifactId>
+  </dependency>
+```
+
+####   2、application.yml
+
+[![复制代码](https://common.cnblogs.com/images/copycode.gif)](javascript:void(0);)
+
+```
+server:
+  port: 7001
+eureka:
+  instance:
+    hostname: localhost
+  client:
+  #声明自己是个服务端
+    registerWithEureka: false    #false表示不向注册中心注册自己
+    fetchRegistry: false         #false表示自己就是注册中心，职责是维护实例，不参加检索
+    serviceUrl:                  #设置eureka server的交互地址，即对外暴露的地址
+      defaultZone: http://${eureka.instance.hostname}:${server.port}/eureka/
+```
+
+[![复制代码](https://common.cnblogs.com/images/copycode.gif)](javascript:void(0);)
+
+  **3、启动类**
+
+[![复制代码](https://common.cnblogs.com/images/copycode.gif)](javascript:void(0);)
+
+```
+//注意：要在类前加@EnableEurekaServer标注
+@SpringBootApplication
+@EnableEurekaServer
+public class Eureka7001_APP {
+    public static void main(String[] args) {
+        SpringApplication.run(Eureka7001_APP.class,args);
+    }
+}
+```
+
+[![复制代码](https://common.cnblogs.com/images/copycode.gif)](javascript:void(0);)
+
+**运行结果:输入：http://localhost:7001/**
+
+![img](https://images2018.cnblogs.com/blog/1090617/201808/1090617-20180830213723185-2088719724.png)
+
+ 
+
+## 三、Service Provider服务提供方
+
+假设这个商品微服务。
+
+####   **1、pom.xml**
+
+```
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+        </dependency>
+```
+
+####   2、application.yml
+
+[![复制代码](https://common.cnblogs.com/images/copycode.gif)](javascript:void(0);)
+
+```
+server:
+  port: 8001
+#指定注册中心地址
+eureka:
+  client:
+    serviceUrl:
+      defaultZone: http://localhost:7001/eureka/
+#服务的名称
+spring:
+  application:
+    name: product-service
+```
+
+[![复制代码](https://common.cnblogs.com/images/copycode.gif)](javascript:void(0);)
+
+####    **3、启动类**
+
+[![复制代码](https://common.cnblogs.com/images/copycode.gif)](javascript:void(0);)
+
+```
+@SpringBootApplication
+public class ProductApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(ProductApplication.class, args);
+    }
+}
+```
+
+[![复制代码](https://common.cnblogs.com/images/copycode.gif)](javascript:void(0);)
+
+####   **4、启动后查看服务注册中心**
+
+ 发现在服务注册中心已经注册了一个服务
+
+#### **![img](https://images2018.cnblogs.com/blog/1090617/201808/1090617-20180830214929700-36418261.png)**
+
+####   5、换端口号再启动一个
+
+#### ![img](https://images2018.cnblogs.com/blog/1090617/201808/1090617-20180830215544494-1392073185.png)
+
+####   6、在看服务中心
+
+####  ![img](https://images2018.cnblogs.com/blog/1090617/201808/1090617-20180830215705418-595017714.png)
+
+这就是搭建了商品微服务集群。
+
+ 
+
+## 四、**Service Consumer服务消费方**
+
+   其实服务方和消费在配置时候没有任何区别，它们都属于Eureka Client组件。只是涉及服务间的调用，所以就把被调方称为提供方，调用方称为消费方。就好比订单微服务，
+
+订单服务肯定需要去调商品微服务，所以这个订单微服务对于商品来讲可以理解服务提供方。一个微服务即可以是服务方也同时是提供方。
+
+####    1、pom.xml
+
+```
+    <!--这个对于每个不是注册中心的微服务都要添加-->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+        </dependency>
+```
+
+####    2、application.yml
+
+[![复制代码](https://common.cnblogs.com/images/copycode.gif)](javascript:void(0);)
+
+```
+server:
+  port: 9001
+
+#指定注册中心地址
+eureka:
+  client:
+    serviceUrl:
+      defaultZone: http://localhost:7001/eureka/
+
+#服务的名称
+spring:
+  application:
+    name: order-service
+```
+
+[![复制代码](https://common.cnblogs.com/images/copycode.gif)](javascript:void(0);)
+
+####   3、启动类
+
+[![复制代码](https://common.cnblogs.com/images/copycode.gif)](javascript:void(0);)
+
+```
+@SpringBootApplication
+public class OrderApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(OrderApplication.class, args);
+    }
+}
+```
+
+[![复制代码](https://common.cnblogs.com/images/copycode.gif)](javascript:void(0);)
+
+#### 4、查看注册中心
+
+发现订单微服务也成功注册到注册中心
+
+![img](https://images2018.cnblogs.com/blog/1090617/201808/1090617-20180830221338153-640709852.png)
+
+ 
+
+至于订单微服务如何调商品微服务呢，下一遍博客在写咯。

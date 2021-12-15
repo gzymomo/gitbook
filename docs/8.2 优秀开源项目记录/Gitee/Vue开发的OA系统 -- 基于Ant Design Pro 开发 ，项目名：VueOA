@@ -1,0 +1,207 @@
+### 源码地址：
+
+github: https://github.com/Miazzy/oa-front-service
+
+gitee: https://gitee.com/yunwisdoms/oa-front-service
+
+ 
+
+### Overview
+
+基于 [Ant Design of Vue](https://vuecomponent.github.io/ant-design-vue/docs/vue/introduce-cn/) 开发的OA综合管理系统
+
+Vue 开发的OA系统
+
+- 具有工作流动态审批、加签、会签等工作流功能，可以对工作流程的审批业务进行评论/讨论
+- 具有文档预览、图片预览等功能
+- 具有博客编写、预览、查看、搜索等功能
+- 具有社区、问答等功能
+- 具有OA系统常用功能
+- 具有在线网盘等功能
+- 工作流引擎完全手写且开源，可以类似钉钉/飞书那样，动态选择审批人员。
+
+### 源码地址：
+
+- github: https://github.com/Miazzy/oa-front-service
+- gitee: https://gitee.com/yunwisdoms/oa-front-service
+- 注意：由于码云仓库最大只支持5G空间，现在容量不足，已经无法提交，故最新代码提交至github仓库，目前由于开发文档、部署文档尚未编写，在后续将抽空编写
+
+### 依赖项目
+
+- https://gitee.com/yunwisdoms/xmysql (数据库API接口Rest服务)
+- https://gitee.com/kekingcn/file-online-preview.git (文档预览服务)
+- https://gitee.com/yunwisdoms/imgproxy.git (图片压缩、在线裁剪、在线处理服务)
+- https://gitee.com/jeecg/jeecg-boot.git (SpringBoot后端服务,本项目的后端是jeecg-boot改造的，用原始的jeecg-boot也是支持)
+- https://gitee.com/sendya/ant-design-pro-vue.git (本项目前端项目由这个开源项目改造而来)
+- https://gitee.com/vilson/vue-projectManage.git (本项目的项目管理系统，就是把这个集成过来，尚未完成)
+- https://gitee.com/miazzy/mili (米粒网开源社区的项目，集成到本项目，提供社区论坛，第三方博客功能)
+
+### 预览地址
+
+- [https://www.shengtai.club](https://www.shengtai.club/) （账户 zhaoziyu/Miazzy@163.com 各位大大，请不要胡乱操作哦，测试环境懒得部署，这个算个小的正式环境）
+
+### 部署文件
+
+- 部署本地mysql数据库 （支持mysql5.7/mysql8.0 , 数据库SQL传送门：https://gitee.com/yunwisdoms/jeecg-database-sync , 下载最新的一个sql.gz，然后用vim打开即可）
+- 部署本地redis缓存服务器 （redis-4/redis-5）
+- 部署xmysql (xmysql要配置本地的mysql数据库，xmysql项目有配置教程，传送门：https://gitee.com/yunwisdoms/xmysql)
+- https://www.shengtai.club/apache-tomcat.tar （下载解压缩，修改里面的application-dev.yml里面数据库连接地址,Redis连接地址）
+- git clone https://gitee.com/yunwisdoms/oa-front-service . (克隆本项目，yarn install后，yarn run serve 运行测试环境，测试环境请修改index.html中的后端服务器、rest服务器连接地址，其他文档预览，图片裁剪的暂时不管)
+- 前端部署打包，在前端项目中运行 yarn run build , 然后将打包后的目录放入Nginx的html文件夹中，配置nginx服务器
+- 部署Nginx ，请先确保安装docker， `docker run --name docker-nginx -p 80:80 -p 8080:80 -p 443:443 -p 8443:443 nginx` (未安装docker不影响哈，自行在linux上部署nginx即可 ，然后把 打包后的前端目录放入Nginx对应的目录中，修改Nginx配置，在下文中列出了一个线上版本的Nginx配置文件)
+
+### 前端技术
+
+- 基础框架：[ant-design-vue](https://github.com/vueComponent/ant-design-vue) - Ant Design Of Vue 实现
+- JavaScript 框架：Vue
+- Webpack
+- node
+- yarn
+- eslint
+- @vue/cli 3.2.1
+- [vue-cropper](https://github.com/xyxiao001/vue-cropper) - 头像裁剪组件
+- [@antv/g2](https://antv.alipay.com/zh-cn/index.html) - Alipay AntV 数据可视化图表
+- [Viser-vue](https://viserjs.github.io/docs.html#/viser/guide/installation) - antv/g2 封装实现
+
+### 项目下载和运行
+
+![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDMxMy8xNjExNDdfZTQzN2Q2ODRfNDk5MDk4LnBuZw?x-oss-process=image/format,png)
+
+![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDMxMi8xNjIzMDZfZDg0NWFiZjVfNDk5MDk4LnBuZw?x-oss-process=image/format,png)
+
+![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDMxMy8xMjI2MzhfNzY3MmM0OTJfNDk5MDk4LnBuZw?x-oss-process=image/format,png)
+
+![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDMxMi8xNjIzMTlfMTNkNWM0YmVfNDk5MDk4LnBuZw?x-oss-process=image/format,png)
+
+![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDMxNi8yMDA3MjlfYzczNzFlNTJfNDk5MDk4LnBuZw?x-oss-process=image/format,png)
+
+![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDMxNi8yMDIxMzFfZWE2ZGYxMGZfNDk5MDk4LnBuZw?x-oss-process=image/format,png)
+
+![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDMxNy8xOTA4NTBfZWE0NmZmZGJfNDk5MDk4LnBuZw?x-oss-process=image/format,png)
+
+![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDMxNy8xOTA5MDlfNjI1Y2JjOWRfNDk5MDk4LnBuZw?x-oss-process=image/format,png)
+
+![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDMxNy8xOTMyMjhfMDdmODlmNzNfNDk5MDk4LnBuZw?x-oss-process=image/format,png)
+
+- 拉取项目代码
+
+```html
+git clone https://gitee.com/yunwisdoms/oa-front-service.git .
+```
+
+- 安装依赖
+
+```html
+yarn install
+```
+
+- 开发模式运行
+
+```html
+yarn run serve
+```
+
+- 编译项目
+
+```html
+yarn run build
+```
+
+- Lints and fixes files
+
+```html
+yarn run lint
+```
+
+ 
+
+### 其他说明
+
+- 项目使用的 [vue-cli3](https://cli.vuejs.org/guide/), 请更新您的 cli
+- 关闭 Eslint (不推荐) 移除 `package.json` 中 `eslintConfig` 整个节点代码
+- 修改 Ant Design 配色，在文件 `vue.config.js` 中，其他 less 变量覆盖参考 [ant design](https://ant.design/docs/react/customize-theme-cn)
+
+官方说明
+
+```html
+  css: {
+
+
+
+    loaderOptions: {
+
+
+
+      less: {
+
+
+
+        modifyVars: {
+
+
+
+          /* less 变量覆盖，用于自定义 ant design 主题 */
+
+
+
+ 
+
+
+
+          'primary-color': '#F5222D',
+
+
+
+          'link-color': '#F5222D',
+
+
+
+          'border-radius-base': '4px',
+
+
+
+        },
+
+
+
+        javascriptEnabled: true,
+
+
+
+      }
+
+
+
+    }
+
+
+
+  }
+```
+
+### 项目截图
+
+首页，含有我的待办，我的已办，行政公告，红头文件，新闻资讯，市场观察等内容，提交审批后，待处理人会收到我的待办消息，点击进入我的审批详情进行审批操作
+
+![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDExNS8wOTQ5NDBfMGNjZGQzNzVfNDk5MDk4LnBuZw?x-oss-process=image/format,png) ![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDExNS8wOTUwNTZfMjJhZTFlYTVfNDk5MDk4LnBuZw?x-oss-process=image/format,png) ![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDExNS8wOTUxMDVfNDgyODg1ZThfNDk5MDk4LnBuZw?x-oss-process=image/format,png) ![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDExNS8wOTUxMTRfMTc1OGJkODZfNDk5MDk4LnBuZw?x-oss-process=image/format,png)
+
+审批流程详情页面，点击‘打码’按钮可以生成二维码，手机扫码后，可以直接跳转到此详情页面 ![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDExNS8wOTUxMjJfODhkOTdkOWZfNDk5MDk4LnBuZw?x-oss-process=image/format,png)
+
+审批流程详情页面，点击‘打码’按钮可以生成短链接，浏览器打开短链接，可以直接跳转到此审批详情页面
+
+![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDExNS8wOTUyMjFfYTE4NTA3MGRfNDk5MDk4LnBuZw?x-oss-process=image/format,png) 审批流程详情页面，上传的附件，可以进行预览，支持Office、PDF、图片预览，后续添加音频、视频等多媒体文件播放功能，Office文档上传后，会触发文档转PDF任务，在文档转换期间，如果预览文档，则调用KKfileView进行预览文档，转换完毕，且文档存在于服务器后端，则直接用已经转换完毕的完毕的PDF文档进行预览，上传的图片会被压缩处理，并生成100x60的缩略图。
+
+![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDExNS8wOTUzMDhfMjllOGEyZDBfNDk5MDk4LnBuZw?x-oss-process=image/format,png) ![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDExNS8wOTU0MjRfYmZiOWRlZTlfNDk5MDk4LnBuZw?x-oss-process=image/format,png)![输入图片说明](https://imgconvert.csdnimg.cn/aHR0cHM6Ly9pbWFnZXMuZ2l0ZWUuY29tL3VwbG9hZHMvaW1hZ2VzLzIwMjAvMDExNS8xNTQ0NTBfMzQ2NmVmZmZfNDk5MDk4LnBuZw?x-oss-process=image/format,png)
+
+### 附属文档
+
+- [Ant Design Vue](https://vuecomponent.github.io/ant-design-vue/docs/vue/introduce-cn)
+- [报表 viser-vue](https://viserjs.github.io/demo.html#/viser/bar/basic-bar)
+- [Vue](https://cn.vuejs.org/v2/guide)
+- [路由/菜单说明](https://github.com/zhangdaiscott/jeecg-boot/tree/master/ant-design-jeecg-vue/src/router/README.md)
+- [ANTD 默认配置项](https://github.com/zhangdaiscott/jeecg-boot/tree/master/ant-design-jeecg-vue/src/defaultSettings.js)
+- 其他待补充...
+
+### 备注
+
+> @vue/cli 升级后，eslint 规则更新了。由于影响到全部 .vue 文件，需要逐个验证。既暂时关闭部分原本不验证的规则，后期维护时，在逐步修正这些 rules

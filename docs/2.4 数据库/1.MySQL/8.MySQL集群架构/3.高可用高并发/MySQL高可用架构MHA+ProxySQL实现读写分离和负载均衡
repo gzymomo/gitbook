@@ -1,0 +1,974 @@
+[MySQL高可用架构MHA+ProxySQL实现读写分离和负载均衡](https://www.cnblogs.com/lhrbest/p/14497786.html)
+
+
+
+# 一、MHA+ProxySQL架构
+
+之前发过一篇MHA的文章，介绍了MHA相关的知识和功能测试，连接为：[【DB宝19】在Docker中使用MySQL高可用之MHA](https://mp.weixin.qq.com/s/m-Ly76StBxgJFPABgIJluw) 。今天这一篇给大家分享一下“MHA+中间件ProxySQL”来实现读写分离+负载均衡的相关知识。
+
+我们都知道，MHA（Master High Availability Manager and tools for MySQL）目前在MySQL高可用方面是一个相对成熟的解决方案，是一套作为MySQL高可用性环境下**故障切换**和**主从提升**的高可用软件。它的架构是要求一个MySQL复制集群必须最少有3台数据库服务器，一主二从，即一台充当Master，一台充当备用Master，另一台充当从库。但是，如果不连接任何外部的数据库中间件，那么就会导致所有的业务压力流向主库，从而造成主库压力过大，而2个从库除了本身的IO和SQL线程外，无任何业务压力，会严重造成资源的浪费。因此，我们可以把MHA和ProxySQL结合使用来实现读写分离和负载均衡。所有的业务通过中间件ProxySQL后，会被分配到不同的MySQL机器上。从而，前端的写操作会流向主库，而读操作会被负载均衡的转发到2个从库上。
+
+MHA+ProxySQL架构如下图所示：
+
+![img](https://gitee.com/lhrbest/pic/raw/master/img/20210223102457.png)
+
+# 二、快速搭建MHA环境
+
+## 2.1 下载MHA镜像
+
+- 小麦苗的Docker Hub的地址：https://hub.docker.com/u/lhrbest
+
+```sql
+-- 下载镜像
+docker pull registry.cn-hangzhou.aliyuncs.com/lhrbest/mha-lhr-master1-ip131
+docker pull registry.cn-hangzhou.aliyuncs.com/lhrbest/mha-lhr-slave1-ip132
+docker pull registry.cn-hangzhou.aliyuncs.com/lhrbest/mha-lhr-slave2-ip133
+docker pull registry.cn-hangzhou.aliyuncs.com/lhrbest/mha-lhr-monitor-ip134
+
+-- 重命名镜像
+docker tag 	registry.cn-hangzhou.aliyuncs.com/lhrbest/mha-lhr-master1-ip131  lhrbest/mha-lhr-master1-ip131
+docker tag	registry.cn-hangzhou.aliyuncs.com/lhrbest/mha-lhr-slave1-ip132   lhrbest/mha-lhr-slave1-ip132 
+docker tag	registry.cn-hangzhou.aliyuncs.com/lhrbest/mha-lhr-slave2-ip133   lhrbest/mha-lhr-slave2-ip133 
+docker tag	registry.cn-hangzhou.aliyuncs.com/lhrbest/mha-lhr-monitor-ip134  lhrbest/mha-lhr-monitor-ip134
+```
+
+一共4个镜像，3个MHA Node，一个MHA Manager，压缩包大概3G，下载完成后：
+
+```sql
+[root@lhrdocker ~]# docker images | grep mha
+registry.cn-hangzhou.aliyuncs.com/lhrbest/mha-lhr-monitor-ip134          latest              7d29597dc997        14 hours ago        1.53GB
+registry.cn-hangzhou.aliyuncs.com/lhrbest/mha-lhr-slave2-ip133           latest              d3717794e93a        40 hours ago        4.56GB
+registry.cn-hangzhou.aliyuncs.com/lhrbest/mha-lhr-slave1-ip132           latest              f62ee813e487        40 hours ago        4.56GB
+registry.cn-hangzhou.aliyuncs.com/lhrbest/mha-lhr-master1-ip131          latest              ae7be48d83dc        40 hours ago        4.56GB
+```
+
+## 2.2 编辑yml文件，创建MHA相关容器
+
+编辑yml文件，使用docker-compose来创建MHA相关容器，注意docker-compose.yml文件的格式，对空格、缩进、对齐都有严格要求：
+
+```sql
+# 创建存放yml文件的路径
+mkdir -p /root/mha
+
+# 编辑文件/root/mha/docker-compose.yml
+cat > /root/mha/docker-compose.yml <<"EOF"
+version: '3.8'
+
+services:
+  MHA-LHR-Master1-ip131:
+    container_name: "MHA-LHR-Master1-ip131"
+    restart: "always"
+    hostname: MHA-LHR-Master1-ip131
+    privileged: true
+    image: lhrbest/mha-lhr-master1-ip131
+    ports:
+      - "33131:3306"
+      - "2201:22"
+    networks:
+      mhalhr:
+        ipv4_address: 192.168.68.131
+
+  MHA-LHR-Slave1-ip132:
+    container_name: "MHA-LHR-Slave1-ip132"
+    restart: "always"
+    hostname: MHA-LHR-Slave1-ip132
+    privileged: true
+    image: lhrbest/mha-lhr-slave1-ip132
+    ports:
+      - "33132:3306"
+      - "2202:22"
+    networks:
+      mhalhr:
+        ipv4_address: 192.168.68.132
+
+  MHA-LHR-Slave2-ip133:
+    container_name: "MHA-LHR-Slave2-ip133"
+    restart: "always"
+    hostname: MHA-LHR-Slave2-ip133
+    privileged: true
+    image: lhrbest/mha-lhr-slave2-ip133
+    ports:
+      - "33133:3306"
+      - "2203:22"
+    networks:
+      mhalhr:
+        ipv4_address: 192.168.68.133
+
+  MHA-LHR-Monitor-ip134:
+    container_name: "MHA-LHR-Monitor-ip134"
+    restart: "always"
+    hostname: MHA-LHR-Monitor-ip134
+    privileged: true
+    image: lhrbest/mha-lhr-monitor-ip134
+    ports:
+      - "33134:3306"
+      - "2204:22"
+    networks:
+      mhalhr:
+        ipv4_address: 192.168.68.134
+
+networks:
+  mhalhr:
+    name: mhalhr
+    ipam:
+      config:
+         - subnet: "192.168.68.0/16"
+
+EOF
+```
+
+## 2.3 安装docker-compose软件（若已安装，可忽略）
+
+- 安装 Docker Compose官方文档：https://docs.docker.com/compose/
+- 编辑docker-compose.yml文件官方文档：https://docs.docker.com/compose/compose-file/
+
+```sql
+[root@lhrdocker ~]# curl --insecure -L https://github.com/docker/compose/releases/download/1.28.4/docker-compose-Linux-x86_64 -o /usr/local/bin/docker-compose
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+100   638  100   638    0     0    530      0  0:00:01  0:00:01 --:--:--   531
+100 11.6M  100 11.6M    0     0  1994k      0  0:00:06  0:00:06 --:--:-- 2943k
+[root@lhrdocker ~]# chmod +x /usr/local/bin/docker-compose
+[root@lhrdocker ~]# docker-compose -v
+docker-compose version 1.28.4, build cabd5cfb
+```
+
+## 2.4 创建MHA容器
+
+```sql
+# 启动mha环境的容器，一定要进入文件夹/root/mha/后再操作
+-- docker rm -f MHA-LHR-Master1-ip131 MHA-LHR-Slave1-ip132 MHA-LHR-Slave2-ip133 MHA-LHR-Monitor-ip134
+[root@lhrdocker ~]# cd /root/mha/
+[root@lhrdocker mha]#
+[root@lhrdocker mha]# docker-compose up -d
+Creating network "mhalhr" with the default driver
+Creating MHA-LHR-Monitor-ip134 ... done
+Creating MHA-LHR-Slave2-ip133  ... done
+Creating MHA-LHR-Master1-ip131 ... done
+Creating MHA-LHR-Slave1-ip132  ... done
+[root@docker35 ~]# docker ps | grep "mha\|COMMAND" 
+CONTAINER ID        IMAGE                           COMMAND                  CREATED             STATUS              PORTS                                                                                           NAMES
+2978361198b7        lhrbest/mha-lhr-master1-ip131   "/usr/sbin/init"         2 minutes ago       Up 2 minutes        16500-16599/tcp, 0.0.0.0:2201->22/tcp, 0.0.0.0:33131->3306/tcp                                  MHA-LHR-Master1-ip131
+a64e2e86589c        lhrbest/mha-lhr-slave1-ip132    "/usr/sbin/init"         2 minutes ago       Up 2 minutes        16500-16599/tcp, 0.0.0.0:2202->22/tcp, 0.0.0.0:33132->3306/tcp                                  MHA-LHR-Slave1-ip132
+d7d6ce34800b        lhrbest/mha-lhr-monitor-ip134   "/usr/sbin/init"         2 minutes ago       Up 2 minutes        0.0.0.0:2204->22/tcp, 0.0.0.0:33134->3306/tcp                                                   MHA-LHR-Monitor-ip134
+dacd22edb2f8        lhrbest/mha-lhr-slave2-ip133    "/usr/sbin/init"         2 minutes ago       Up 2 minutes        16500-16599/tcp, 0.0.0.0:2203->22/tcp, 0.0.0.0:33133->3306/tcp                                  MHA-LHR-Slave2-ip133
+```
+
+## 2.5 主库131添加VIP
+
+```sh
+# 进入主库131
+docker exec -it MHA-LHR-Master1-ip131 bash
+
+# 添加VIP135
+/sbin/ifconfig eth0:1 192.168.68.135/24
+ifconfig
+
+# 如果删除的话
+ip addr del 192.168.68.135/24 dev eth1
+```
+
+添加完成后：
+
+```sh
+[root@MHA-LHR-Master1-ip131 /]# ifconfig
+eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+        inet 192.168.68.131  netmask 255.255.0.0  broadcast 192.168.255.255
+        ether 02:42:c0:a8:44:83  txqueuelen 0  (Ethernet)
+        RX packets 220  bytes 15883 (15.5 KiB)
+        RX errors 0  dropped 0  overruns 0  frame 0
+        TX packets 189  bytes 17524 (17.1 KiB)
+        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
+
+eth0:1: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+        inet 192.168.68.135  netmask 255.255.255.0  broadcast 192.168.68.255
+        ether 02:42:c0:a8:44:83  txqueuelen 0  
+lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536
+        inet 127.0.0.1  netmask 255.0.0.0
+        loop  txqueuelen 1000  (Local Loopback)
+        RX packets 5  bytes 400 (400.0 B)
+        RX errors 0  dropped 0  overruns 0  frame 0
+        TX packets 5  bytes 400 (400.0 B)
+        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
+        
+# 管理节点已经可以ping通VIP了
+[root@MHA-LHR-Monitor-ip134 /]# ping 192.168.68.135
+PING 192.168.68.135 (192.168.68.135) 56(84) bytes of data.
+64 bytes from 192.168.68.135: icmp_seq=1 ttl=64 time=0.172 ms
+64 bytes from 192.168.68.135: icmp_seq=2 ttl=64 time=0.076 ms
+^C
+--- 192.168.68.135 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1000ms
+rtt min/avg/max/mdev = 0.076/0.124/0.172/0.048 ms
+```
+
+到这一步就可以验证主从复制是否正确，若正确，则可以直接测试MHA了。
+
+```sql
+mysql -uroot -plhr -h192.168.68.131 -P3306
+show slave hosts;
+mysql> show slave hosts;
++-----------+----------------+------+-----------+--------------------------------------+
+| Server_id | Host           | Port | Master_id | Slave_UUID                           |
++-----------+----------------+------+-----------+--------------------------------------+
+| 573306133 | 192.168.68.133 | 3306 | 573306131 | d391ce7e-aec3-11ea-94cd-0242c0a84485 |
+| 573306132 | 192.168.68.132 | 3306 | 573306131 | d24a77d1-aec3-11ea-9399-0242c0a84484 |
++-----------+----------------+------+-----------+--------------------------------------+
+2 rows in set (0.00 sec)
+```
+
+![img](https://gitee.com/lhrbest/pic/raw/master/img/20210223110249.png)
+
+# 三、配置ProxySQL环境
+
+## 3.1 申请ProxySQL主机并安装ProxySQL
+
+```sql
+docker rm -f MHA-LHR-ProxySQL-ip136
+docker run -d --name MHA-LHR-ProxySQL-ip136 -h MHA-LHR-ProxySQL-ip136 \
+  -v /sys/fs/cgroup:/sys/fs/cgroup \
+  --network mhalhr --ip 192.168.68.136 \
+  -p 26032:6032 -p 26033:6033 -p 26080:6080 \
+  --privileged=true lhrbest/lhrcentos76:8.0 \
+  /usr/sbin/init
+
+docker network connect bridge MHA-LHR-ProxySQL-ip136
+docker restart MHA-LHR-ProxySQL-ip136
+
+docker cp proxysql2-2.0.15-1.1.el7.x86_64.rpm MHA-LHR-ProxySQL-ip136:/
+docker exec -it MHA-LHR-ProxySQL-ip136 bash
+rpm -ivh proxysql2-2.0.15-1.1.el7.x86_64.rpm
+
+
+systemctl start proxysql
+systemctl status proxysql
+```
+
+## 3.2 添加远程登录用户
+
+```sql
+-- 添加远程登录用户
+mysql -uadmin -padmin -h127.0.0.1 -P6032
+select @@admin-admin_credentials;
+set admin-admin_credentials='admin:admin;root:lhr';
+select @@admin-admin_credentials;
+load admin variables to runtime;
+save admin variables to disk;
+
+-- 远程登录
+mysql -uroot -plhr -h192.168.66.35 -P26032
+```
+
+执行过程：
+
+```sql
+-- ProxySQL本地登录
+[root@MHA-LHR-ProxySQL-ip136 /]# mysql -uadmin -padmin -h127.0.0.1 -P6032
+mysql: [Warning] Using a password on the command line interface can be insecure.
+Welcome to the MySQL monitor.  Commands end with ; or \g.
+Your MySQL connection id is 162
+Server version: 5.5.30 (ProxySQL Admin Module)
+
+Copyright (c) 2000, 2020, Oracle and/or its affiliates. All rights reserved.
+
+Oracle is a registered trademark of Oracle Corporation and/or its
+affiliates. Other names may be trademarks of their respective
+owners.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+mysql> select @@admin-admin_credentials;
++---------------------------+
+| @@admin-admin_credentials |
++---------------------------+
+| admin:admin;lhr:lhr       |
++---------------------------+
+1 row in set (0.05 sec)
+
+mysql> set admin-admin_credentials='admin:admin;root:lhr';
+Query OK, 1 row affected (0.00 sec)
+
+mysql> select @@admin-admin_credentials;
++---------------------------+
+| @@admin-admin_credentials |
++---------------------------+
+| admin:admin;root:lhr      |
++---------------------------+
+1 row in set (0.00 sec)
+
+mysql> load admin variables to runtime;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> save admin variables to disk;
+Query OK, 35 rows affected (0.13 sec)
+
+mysql> 
+
+-- 远程登录
+C:\Users\lhrxxt>mysql -uroot -plhr -h192.168.66.35 -P26032
+mysql: [Warning] Using a password on the command line interface can be insecure.
+ERROR 1045 (28000): ProxySQL Error: Access denied for user 'root'@'172.17.0.1' (using password: YES)
+
+C:\Users\lhrxxt>mysql -uroot -plhr -h192.168.66.35 -P26032
+mysql: [Warning] Using a password on the command line interface can be insecure.
+Welcome to the MySQL monitor.  Commands end with ; or \g.
+Your MySQL connection id is 163
+Server version: 5.5.30 (ProxySQL Admin Module)
+
+Copyright (c) 2000, 2020, Oracle and/or its affiliates. All rights reserved.
+
+Oracle is a registered trademark of Oracle Corporation and/or its
+affiliates. Other names may be trademarks of their respective
+owners.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+MySQL [(none)]> show databases;
++-----+---------------+-------------------------------------+
+| seq | name          | file                                |
++-----+---------------+-------------------------------------+
+| 0   | main          |                                     |
+| 2   | disk          | /var/lib/proxysql/proxysql.db       |
+| 3   | stats         |                                     |
+| 4   | monitor       |                                     |
+| 5   | stats_history | /var/lib/proxysql/proxysql_stats.db |
++-----+---------------+-------------------------------------+
+5 rows in set (0.05 sec)
+```
+
+## 3.3 开启ProxySQL的web监控功能
+
+```sql
+-- 开启web监控功能
+SET admin-web_enabled='true';
+LOAD ADMIN VARIABLES TO RUNTIME;
+SAVE ADMIN VARIABLES TO DISK;
+select * from global_variables where variable_name LIKE 'admin-web_enabled';
+select @@admin-web_enabled;
+
+lsof -i:6080
+
+-- 浏览器访问
+https://192.168.66.35:26080
+用户名和密码：stats:stats
+```
+
+![img](https://gitee.com/lhrbest/pic/raw/master/img/20210223111607.png)
+
+## 3.4 配置被监控的数据库
+
+### 3.4.1 向ProxySQL插入被监控数据库
+
+```sql
+-- 1、向ProxySQL插入被监控数据库
+select * from mysql_servers;
+insert into main.mysql_servers(hostgroup_id,hostname,port) values(10,'192.168.68.131',3306);
+insert into main.mysql_servers(hostgroup_id,hostname,port) values(10,'192.168.68.132',3306);
+insert into main.mysql_servers(hostgroup_id,hostname,port) values(10,'192.168.68.133',3306);
+load mysql servers to runtime;
+save mysql servers to disk;
+select * from mysql_servers;
+MySQL [(none)]> select * from mysql_servers;
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+| hostgroup_id | hostname       | port | gtid_port | status | weight | compression | max_connections | max_replication_lag | use_ssl | max_latency_ms | comment |
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+| 10           | 192.168.68.131 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 10           | 192.168.68.132 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 10           | 192.168.68.133 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+3 rows in set (0.07 sec)
+```
+
+### 3.4.2 在所有被监控MySQL服务器上创建监控帐户
+
+```sql
+-- 2、在所有被监控MySQL服务器上创建帐户，注意：新版本中，这里的密码必须为monitor，可参考配置文件/etc/proxysql.cnf
+mysql -uroot -plhr -h192.168.66.35 -P33131
+create user 'monitor'@'%' IDENTIFIED BY 'monitor';
+GRANT all privileges ON *.* TO 'monitor'@'%' with grant option;
+select user,host from mysql.user;
+
+mysql> select user,host from mysql.user;
++---------------+--------------+
+| user          | host         |
++---------------+--------------+
+| mha           | %            |
+| monitor       | %            |
+| repl          | %            |
+| root          | %            |
+| mysql.session | localhost    |
+| mysql.sys     | localhost    |
+| root          | localhost    |
++---------------+--------------+
+7 rows in set (0.00 sec)
+```
+
+### 3.4.3 在所有被监控MySQL服务器上创建对外访问账户
+
+```sql
+-- 3、 在所有被监控MySQL服务器上创建对外访问账户：
+create user 'wr'@'%' IDENTIFIED BY 'lhr';
+GRANT all privileges ON *.* TO 'wr'@'%' with grant option; 
+
+-- 配置到ProxySQL中
+insert into mysql_users(username,password,default_hostgroup) values('wr','lhr',10);
+update mysql_users set transaction_persistent=1 where username='wr';
+load mysql users to runtime;
+save mysql users to disk;
+select * from mysql_users;
+
+MySQL [(none)]> select * from mysql_users;
++----------+----------+--------+---------+-------------------+----------------+---------------+------------------------+--------------+---------+----------+-----------------+---------+
+| username | password | active | use_ssl | default_hostgroup | default_schema | schema_locked | transaction_persistent | fast_forward | backend | frontend | max_connections | comment |
++----------+----------+--------+---------+-------------------+----------------+---------------+------------------------+--------------+---------+----------+-----------------+---------+
+| wr       | lhr      | 1      | 0       | 10                | NULL           | 0             | 1                      | 0            | 1       | 1        | 10000           |         |
++----------+----------+--------+---------+-------------------+----------------+---------------+------------------------+--------------+---------+----------+-----------------+---------+
+1 row in set (0.05 sec)
+```
+
+### 3.4.4 配置监控
+
+```sql
+-- 4、在ProxySQL端执行下列SQL语句：
+set mysql-monitor_username='monitor';
+set mysql-monitor_password='monitor';
+load mysql servers to runtime;
+save mysql servers to disk;
+select * from global_variables where variable_name in('mysql-monitor_username','mysql-monitor_password');
++------------------------+----------------+
+| variable_name          | variable_value |
++------------------------+----------------+
+| mysql-monitor_password | monitor        |
+| mysql-monitor_username | monitor        |
++------------------------+----------------+
+2 rows in set (0.05 sec)
+
+
+-- 检查连接到MySQL的日志
+select * from monitor.mysql_server_ping_log order by time_start_us desc limit 6;
+select * from monitor.mysql_server_connect_log order by time_start_us desc limit 6;
+MySQL [(none)]> select * from monitor.mysql_server_ping_log order by time_start_us desc limit 6;
++----------------+------+------------------+----------------------+------------+
+| hostname       | port | time_start_us    | ping_success_time_us | ping_error |
++----------------+------+------------------+----------------------+------------+
+| 192.168.68.132 | 3306 | 1614050308827202 | 252                  | NULL       |
+| 192.168.68.133 | 3306 | 1614050308716530 | 370                  | NULL       |
+| 192.168.68.131 | 3306 | 1614050308605853 | 542                  | NULL       |
+| 192.168.68.131 | 3306 | 1614050298778908 | 334                  | NULL       |
+| 192.168.68.133 | 3306 | 1614050298690947 | 297                  | NULL       |
+| 192.168.68.132 | 3306 | 1614050298605725 | 344                  | NULL       |
++----------------+------+------------------+----------------------+------------+
+6 rows in set (0.06 sec)
+
+MySQL [(none)]> select * from monitor.mysql_server_connect_log order by time_start_us desc limit 6;
++----------------+------+------------------+-------------------------+---------------+
+| hostname       | port | time_start_us    | connect_success_time_us | connect_error |
++----------------+------+------------------+-------------------------+---------------+
+| 192.168.68.131 | 3306 | 1614050285481316 | 1173                    | NULL          |
+| 192.168.68.133 | 3306 | 1614050284894846 | 1008                    | NULL          |
+| 192.168.68.132 | 3306 | 1614050284309124 | 970                     | NULL          |
+| 192.168.68.131 | 3306 | 1614050225194575 | 1108                    | NULL          |
+| 192.168.68.133 | 3306 | 1614050224751771 | 987                     | NULL          |
+| 192.168.68.132 | 3306 | 1614050224309026 | 1294                    | NULL          |
++----------------+------+------------------+-------------------------+---------------+
+6 rows in set (0.05 sec)
+```
+
+### 3.4.5 配置MySQL主机组
+
+```sql
+-- 5、实验使用10作为写入组，20作为读取组。
+show create table mysql_replication_hostgroups\G;
+writer_hostgroup 写入组的编号
+reader_hostgroup 读取组的编号
+
+
+-- 注意：需要配置从库的read_only=1
+show variables like 'read_only';
+set global read_only=1;
+
+insert into mysql_replication_hostgroups(writer_hostgroup,reader_hostgroup,comment) values(10,20,'proxy');
+load mysql servers to runtime;
+save mysql servers to disk;
+select * from mysql_replication_hostgroups;
+select * from mysql_server_read_only_log  order by time_start_us desc limit  3;
+select * from mysql_servers;
+
+MySQL [(none)]> select * from mysql_replication_hostgroups;
++------------------+------------------+------------+---------+
+| writer_hostgroup | reader_hostgroup | check_type | comment |
++------------------+------------------+------------+---------+
+| 10               | 20               | read_only  | proxy   |
++------------------+------------------+------------+---------+
+1 row in set (0.05 sec)
+
+MySQL [(none)]> select * from mysql_server_read_only_log  order by time_start_us desc limit  3;
++----------------+------+------------------+-----------------+-----------+-------+
+| hostname       | port | time_start_us    | success_time_us | read_only | error |
++----------------+------+------------------+-----------------+-----------+-------+
+| 192.168.68.133 | 3306 | 1614050367153351 | 611             | 1         | NULL  |
+| 192.168.68.131 | 3306 | 1614050367136396 | 490             | 0         | NULL  |
+| 192.168.68.132 | 3306 | 1614050367119511 | 531             | 1         | NULL  |
++----------------+------+------------------+-----------------+-----------+-------+
+3 rows in set (0.05 sec)
+
+MySQL [(none)]> select * from mysql_servers;
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+| hostgroup_id | hostname       | port | gtid_port | status | weight | compression | max_connections | max_replication_lag | use_ssl | max_latency_ms | comment |
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+| 10           | 192.168.68.131 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.132 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.133 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+3 rows in set (0.05 sec)
+```
+
+注意，此时mysql_servers表中的hostgroup_id值已发生变化。
+
+### 3.4.6 配置读写分离策略
+
+```sql
+-- 6、配置读写分离策略
+insert into mysql_query_rules(active,match_pattern,destination_hostgroup,apply) values(1,'^SELECT.*FOR UPDATE$',10,1);
+insert into mysql_query_rules(active,match_pattern,destination_hostgroup,apply) values(1,'^SELECT',20,1);
+LOAD MYSQL QUERY RULES TO RUNTIME;
+SAVE MYSQL QUERY RULES TO DISK;
+
+-- 配置查询select的请求转发到hostgroup_id=2组上（读组）
+-- 针对select * from table_name  for update这样的修改语句，我们是需要将请求转到写组，也就是hostgroup_id=1
+-- 对于其它没有被规则匹配的请求全部转发到默认的组（mysql_users表中default_hostgroup）
+select * from  mysql_query_rules;
+select username,password,default_hostgroup from mysql_users;
+MySQL [(none)]> select * from  mysql_query_rules;
++---------+--------+----------+------------+--------+-------------+------------+------------+--------+--------------+----------------------+----------------------+--------------+---------+-----------------+-----------------------+-----------+--------------------+---------------+-----------+---------+---------+-------+-------------------+----------------+------------------+-----------+--------+-------------+-----------+---------------------+-----+-------+---------+
+| rule_id | active | username | schemaname | flagIN | client_addr | proxy_addr | proxy_port | digest | match_digest | match_pattern        | negate_match_pattern | re_modifiers | flagOUT | replace_pattern | destination_hostgroup | cache_ttl | cache_empty_result | cache_timeout | reconnect | timeout | retries | delay | next_query_flagIN | mirror_flagOUT | mirror_hostgroup | error_msg | OK_msg | sticky_conn | multiplex | gtid_from_hostgroup | log | apply | comment |
++---------+--------+----------+------------+--------+-------------+------------+------------+--------+--------------+----------------------+----------------------+--------------+---------+-----------------+-----------------------+-----------+--------------------+---------------+-----------+---------+---------+-------+-------------------+----------------+------------------+-----------+--------+-------------+-----------+---------------------+-----+-------+---------+
+| 1       | 1      | NULL     | NULL       | 0      | NULL        | NULL       | NULL       | NULL   | NULL         | ^SELECT.*FOR UPDATE$ | 0                    | CASELESS     | NULL    | NULL            | 10                    | NULL      | NULL               | NULL          | NULL      | NULL    | NULL    | NULL  | NULL              | NULL           | NULL             | NULL      | NULL   | NULL        | NULL      | NULL                | NULL | 1     | NULL    |
+| 2       | 1      | NULL     | NULL       | 0      | NULL        | NULL       | NULL       | NULL   | NULL         | ^SELECT              | 0                    | CASELESS     | NULL    | NULL            | 20                    | NULL      | NULL               | NULL          | NULL      | NULL    | NULL    | NULL  | NULL              | NULL           | NULL             | NULL      | NULL   | NULL        | NULL      | NULL                | NULL | 1     | NULL    |
++---------+--------+----------+------------+--------+-------------+------------+------------+--------+--------------+----------------------+----------------------+--------------+---------+-----------------+-----------------------+-----------+--------------------+---------------+-----------+---------+---------+-------+-------------------+----------------+------------------+-----------+--------+-------------+-----------+---------------------+-----+-------+---------+
+2 rows in set (0.05 sec)
+
+MySQL [(none)]> select username,password,default_hostgroup from mysql_users;
++----------+----------+-------------------+
+| username | password | default_hostgroup |
++----------+----------+-------------------+
+| wr       | lhr      | 10                |
++----------+----------+-------------------+
+1 row in set (0.05 sec)
+```
+
+至此，ProxySQL读写分离和负载均衡已配置完成，接下来我们进行测试。
+
+# 四、测试读负载均衡
+
+```sql
+[root@docker35 ~]# for i in $(seq 1 10); do  mysql -uwr -plhr -h192.168.68.136 -P6033 -e 'select @@server_id;'; done | egrep '[0-9]'
+mysql: [Warning] Using a password on the command line interface can be insecure.
+573306133
+mysql: [Warning] Using a password on the command line interface can be insecure.
+573306132
+mysql: [Warning] Using a password on the command line interface can be insecure.
+573306132
+mysql: [Warning] Using a password on the command line interface can be insecure.
+573306132
+mysql: [Warning] Using a password on the command line interface can be insecure.
+573306133
+mysql: [Warning] Using a password on the command line interface can be insecure.
+573306133
+mysql: [Warning] Using a password on the command line interface can be insecure.
+573306133
+mysql: [Warning] Using a password on the command line interface can be insecure.
+573306132
+mysql: [Warning] Using a password on the command line interface can be insecure.
+573306132
+mysql: [Warning] Using a password on the command line interface can be insecure.
+573306132
+
+MySQL [(none)]> SELECT * FROM stats.stats_mysql_connection_pool;
++-----------+----------------+----------+--------+----------+----------+--------+---------+-------------+---------+-------------------+-----------------+-----------------+------------+
+| hostgroup | srv_host       | srv_port | status | ConnUsed | ConnFree | ConnOK | ConnERR | MaxConnUsed | Queries | Queries_GTID_sync | Bytes_data_sent | Bytes_data_recv | Latency_us |
++-----------+----------------+----------+--------+----------+----------+--------+---------+-------------+---------+-------------------+-----------------+-----------------+------------+
+| 10        | 192.168.68.131 | 3306     | ONLINE | 0        | 0        | 0      | 0       | 0           | 0       | 0                 | 0               | 0               | 323        |
+| 20        | 192.168.68.132 | 3306     | ONLINE | 0        | 1        | 1      | 0       | 1           | 6       | 0                 | 108             | 84              | 280        |
+| 20        | 192.168.68.133 | 3306     | ONLINE | 0        | 1        | 1      | 0       | 1           | 4       | 0                 | 72              | 56              | 390        |
++-----------+----------------+----------+--------+----------+----------+--------+---------+-------------+---------+-------------------+-----------------+-----------------+------------+
+3 rows in set (0.06 sec)
+-- 可以看到Queries列分配到132和133的从库上。
+
+-- 接下来使用mysqlslap来做压测
+[root@docker35 ~]# 
+[root@docker35 ~]# mysqlslap -uwr -plhr -h192.168.68.136 -P6033  --create-schema=lhrmysqlslap  --auto-generate-sql --auto-generate-sql-load-type=read --number-of-queries=100000 
+mysqlslap: [Warning] Using a password on the command line interface can be insecure.
+Benchmark
+        Average number of seconds to run all queries: 104.757 seconds
+        Minimum number of seconds to run all queries: 104.757 seconds
+        Maximum number of seconds to run all queries: 104.757 seconds
+        Number of clients running queries: 1
+        Average number of queries per client: 100000
+        
+
+MySQL [(none)]> SELECT * FROM stats_mysql_commands_counters WHERE Total_cnt;
++-----------------+---------------+-----------+-----------+-----------+---------+---------+----------+----------+-----------+-----------+--------+--------+---------+----------+
+| Command         | Total_Time_us | Total_cnt | cnt_100us | cnt_500us | cnt_1ms | cnt_5ms | cnt_10ms | cnt_50ms | cnt_100ms | cnt_500ms | cnt_1s | cnt_5s | cnt_10s | cnt_INFs |
++-----------------+---------------+-----------+-----------+-----------+---------+---------+----------+----------+-----------+-----------+--------+--------+---------+----------+
+| CREATE_DATABASE | 90942         | 3         | 0         | 0         | 0       | 2       | 0        | 0        | 1         | 0         | 0      | 0      | 0       | 0        |
+| CREATE_TABLE    | 67954         | 3         | 0         | 0         | 0       | 0       | 0        | 3        | 0         | 0         | 0      | 0      | 0       | 0        |
+| INSERT          | 11337671      | 113       | 0         | 0         | 0       | 69      | 27       | 14       | 1         | 0         | 1      | 0      | 0       | 1        |
+| SELECT          | 15299552      | 22293     | 263       | 1588      | 18947   | 1453    | 29       | 10       | 2         | 1         | 0      | 0      | 0       | 0        |
+| SHOW            | 56308         | 1         | 0         | 0         | 0       | 0       | 0        | 0        | 1         | 0         | 0      | 0      | 0       | 0        |
+| UNKNOWN         | 131355        | 2         | 0         | 0         | 0       | 1       | 0        | 0        | 0         | 1         | 0      | 0      | 0       | 0        |
++-----------------+---------------+-----------+-----------+-----------+---------+---------+----------+----------+-----------+-----------+--------+--------+---------+----------+
+6 rows in set (0.11 sec)
+
+MySQL [(none)]> SELECT * FROM stats_mysql_commands_counters WHERE Total_cnt;
++-----------------+---------------+-----------+-----------+-----------+---------+---------+----------+----------+-----------+-----------+--------+--------+---------+----------+
+| Command         | Total_Time_us | Total_cnt | cnt_100us | cnt_500us | cnt_1ms | cnt_5ms | cnt_10ms | cnt_50ms | cnt_100ms | cnt_500ms | cnt_1s | cnt_5s | cnt_10s | cnt_INFs |
++-----------------+---------------+-----------+-----------+-----------+---------+---------+----------+----------+-----------+-----------+--------+--------+---------+----------+
+| CREATE_DATABASE | 90942         | 3         | 0         | 0         | 0       | 2       | 0        | 0        | 1         | 0         | 0      | 0      | 0       | 0        |
+| CREATE_TABLE    | 67954         | 3         | 0         | 0         | 0       | 0       | 0        | 3        | 0         | 0         | 0      | 0      | 0       | 0        |
+| INSERT          | 11337671      | 113       | 0         | 0         | 0       | 69      | 27       | 14       | 1         | 0         | 1      | 0      | 0       | 1        |
+| SELECT          | 16494138      | 24050     | 263       | 1744      | 20488   | 1512    | 29       | 10       | 3         | 1         | 0      | 0      | 0       | 0        |
+| SHOW            | 56308         | 1         | 0         | 0         | 0       | 0       | 0        | 0        | 1         | 0         | 0      | 0      | 0       | 0        |
+| UNKNOWN         | 131355        | 2         | 0         | 0         | 0       | 1       | 0        | 0        | 0         | 1         | 0      | 0      | 0       | 0        |
++-----------------+---------------+-----------+-----------+-----------+---------+---------+----------+----------+-----------+-----------+--------+--------+---------+----------+
+6 rows in set (0.07 sec)
+
+MySQL [(none)]>  SELECT * FROM stats.stats_mysql_connection_pool;
++-----------+----------------+----------+--------+----------+----------+--------+---------+-------------+---------+-------------------+-----------------+-----------------+------------+
+| hostgroup | srv_host       | srv_port | status | ConnUsed | ConnFree | ConnOK | ConnERR | MaxConnUsed | Queries | Queries_GTID_sync | Bytes_data_sent | Bytes_data_recv | Latency_us |
++-----------+----------------+----------+--------+----------+----------+--------+---------+-------------+---------+-------------------+-----------------+-----------------+------------+
+| 10        | 192.168.68.131 | 3306     | ONLINE | 0        | 1        | 1      | 0       | 1           | 107     | 0                 | 16464           | 92              | 277        |
+| 20        | 192.168.68.132 | 3306     | ONLINE | 0        | 1        | 1      | 0       | 1           | 24052   | 0                 | 768920          | 335907539       | 306        |
+| 20        | 192.168.68.133 | 3306     | ONLINE | 1        | 0        | 1      | 0       | 1           | 24061   | 0                 | 769119          | 335923167       | 381        |
++-----------+----------------+----------+--------+----------+----------+--------+---------+-------------+---------+-------------------+-----------------+-----------------+------------+
+3 rows in set (0.39 sec)
+
+MySQL [(none)]> SELECT hostgroup,schemaname ,  username ,  digest , sum_time, count_star, substr(digest_text,1,60) FROM stats_mysql_query_digest where schemaname='lhrmysqlslap' ORDER BY sum_time DESC;
++-----------+--------------+----------+--------------------+----------+------------+---------------------------------------------------------+
+| hostgroup | schemaname   | username | digest             | sum_time | count_star | substr(digest_text,1,60)                                |
++-----------+--------------+----------+--------------------+----------+------------+---------------------------------------------------------+
+| 20        | lhrmysqlslap | wr       | 0x91B125A563AED6EB | 65166273 | 100000     | SELECT intcol1,charcol1 FROM t1                         |
+| 10        | lhrmysqlslap | wr       | 0xBCFD962F4A5FFA4B | 1134087  | 99         | INSERT INTO t1 VALUES (?,?)                             |
+| 10        | lhrmysqlslap | wr       | 0x50E8C33778819FCD | 23904    | 1          | CREATE TABLE `t1` (intcol1 INT(?) ,charcol1 VARCHAR(?)) |
+| 10        | lhrmysqlslap | wr       | 0x41B7F05694EF426F | 21351    | 1          | DROP SCHEMA IF EXISTS `lhrmysqlslap`                    |
++-----------+--------------+----------+--------------------+----------+------------+---------------------------------------------------------+
+4 rows in set (0.08 sec)
+```
+
+可以看出，负载被分别被分配到132和133上。
+
+# 五、测试读写分离
+
+```sql
+-- 测试读写分离
+mysql -uwr -plhr -h192.168.66.35 -P26033
+
+create database test_proxysql;
+use test_proxysql;
+create table test_tables(name varchar(20),age int(4));
+insert into test_tables values('lhr','33');
+select * from test_tables;
+
+
+select * from stats_mysql_query_digest;
+
+MySQL [(none)]> SELECT * FROM stats.stats_mysql_connection_pool;
++-----------+----------------+----------+--------+----------+----------+--------+---------+-------------+---------+-------------------+-----------------+-----------------+------------+
+| hostgroup | srv_host       | srv_port | status | ConnUsed | ConnFree | ConnOK | ConnERR | MaxConnUsed | Queries | Queries_GTID_sync | Bytes_data_sent | Bytes_data_recv | Latency_us |
++-----------+----------------+----------+--------+----------+----------+--------+---------+-------------+---------+-------------------+-----------------+-----------------+------------+
+| 10        | 192.168.68.131 | 3306     | ONLINE | 0        | 1        | 1      | 0       | 1           | 5       | 0                 | 165             | 92              | 369        |
+| 20        | 192.168.68.132 | 3306     | ONLINE | 0        | 1        | 1      | 0       | 1           | 8       | 0                 | 142             | 130             | 301        |
+| 20        | 192.168.68.133 | 3306     | ONLINE | 0        | 1        | 1      | 0       | 1           | 5       | 0                 | 97              | 67              | 341        |
++-----------+----------------+----------+--------+----------+----------+--------+---------+-------------+---------+-------------------+-----------------+-----------------+------------+
+3 rows in set (0.07 sec)
+-- 可以看到写操作被分配到131主机上。
+
+
+-- 其它表的统计信息
+SELECT * FROM stats.stats_mysql_connection_pool;
+SELECT * FROM stats_mysql_commands_counters WHERE Total_cnt;
+SELECT * FROM stats_mysql_query_digest ORDER BY sum_time DESC;
+SELECT hostgroup,schemaname ,  username ,  digest , sum_time, count_star, substr(digest_text,1,60) FROM stats_mysql_query_digest where schemaname='lhrmysqlslap' ORDER BY sum_time DESC;
+
+
+-- 清空数据，查询stats_mysql_query_digest_reset表时，会自动从stats_mysql_query_digest中临时抓取数据，并truncate。
+SELECT * FROM stats_mysql_query_digest_reset LIMIT 1;
+
+
+
+-- 使用sysbench继续读写分离测试
+-- 配置MySQL最大连接数：set global max_connections=1000;
+
+sysbench /usr/share/sysbench/oltp_common.lua --time=300 --mysql-host=192.168.68.136 --mysql-port=6033 --mysql-user=wr --mysql-password=lhr --mysql-db=sbtest --table-size=100000 --tables=20 --threads=100 --events=999999999   prepare
+
+sysbench /usr/share/sysbench/oltp_read_write.lua --time=300 --mysql-host=192.168.68.136 --mysql-port=6033 --mysql-user=wr --mysql-password=lhr --mysql-db=sbtest --table-size=10000 --tables=20 --threads=100 --events=999999999  --report-interval=10 --db-ps-mode=disable --forced-shutdown=1 run
+
+sysbench /usr/share/sysbench/oltp_read_only.lua --time=300 --mysql-host=192.168.68.136 --mysql-port=6033 --mysql-user=wr --mysql-password=lhr --mysql-db=sbtest --table-size=10000 --tables=20 --threads=100 --events=999999999  --report-interval=10 --db-ps-mode=disable --forced-shutdown=1 run
+
+
+-- 查询读写分离的监控数据
+MySQL [(none)]> SELECT hostgroup,schemaname ,  username ,  digest , sum_time, count_star, substr(digest_text,1,60) FROM stats_mysql_query_digest where schemaname='sbtest' ORDER BY sum_time DESC;
++-----------+------------+----------+--------------------+----------+------------+--------------------------------------------------------------+
+| hostgroup | schemaname | username | digest             | sum_time | count_star | substr(digest_text,1,60)                                     |
++-----------+------------+----------+--------------------+----------+------------+--------------------------------------------------------------+
+| 10        | sbtest     | wr       | 0x76607360EFEAC208 | 84059739 | 37         | INSERT INTO sbtest14(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0x02834C12D1767CBF | 81396186 | 37         | INSERT INTO sbtest19(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0xF175422CAEB5052B | 80172428 | 37         | INSERT INTO sbtest5(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0xD264943870461B52 | 78250552 | 37         | INSERT INTO sbtest9(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0x2F9D0B4C12C50457 | 75761155 | 37         | INSERT INTO sbtest13(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0x0482F61CCAD957B8 | 74841767 | 37         | INSERT INTO sbtest16(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0x2BA639A0C593250B | 74744554 | 37         | INSERT INTO sbtest20(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0x131C045B3F7FC633 | 74710835 | 37         | INSERT INTO sbtest12(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0x9677C76C4DF88251 | 74446715 | 37         | INSERT INTO sbtest6(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0x36760936592E8530 | 74289312 | 37         | INSERT INTO sbtest2(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0xEFBA5FC0C8412297 | 72425766 | 37         | INSERT INTO sbtest18(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0xDF47484FFE945EDD | 70572836 | 37         | INSERT INTO sbtest8(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0x27D376AC1710C980 | 66516942 | 37         | INSERT INTO sbtest11(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0x4D433FDEA1B945C1 | 65829143 | 37         | INSERT INTO sbtest10(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0xFF6D9C6F32545951 | 65739929 | 37         | INSERT INTO sbtest1(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0x772AE6B66160E91E | 65271284 | 37         | INSERT INTO sbtest7(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0x4F8D29910113CAE6 | 64822306 | 37         | INSERT INTO sbtest15(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0x7502AE74F4B0113E | 64133812 | 37         | INSERT INTO sbtest4(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0x4B083B064FF4F9D9 | 61931719 | 37         | INSERT INTO sbtest17(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0x3C6D29F861CD6572 | 60387247 | 37         | INSERT INTO sbtest3(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0x8965AD5701787BC0 | 33638613 | 1          | CREATE INDEX k_3 ON sbtest3(k)                               |
+| 10        | sbtest     | wr       | 0xB12065B0D79AC0DD | 33288092 | 1          | CREATE INDEX k_17 ON sbtest17(k)                             |
+| 10        | sbtest     | wr       | 0xC46D61BAA605D7D3 | 32926000 | 1          | CREATE INDEX k_1 ON sbtest1(k)                               |
+| 10        | sbtest     | wr       | 0x2BF8C8E7084502D5 | 32904517 | 1          | CREATE INDEX k_7 ON sbtest7(k)                               |
+| 10        | sbtest     | wr       | 0x6F22CFB8FF512B02 | 32625659 | 1          | CREATE INDEX k_4 ON sbtest4(k)                               |
+| 10        | sbtest     | wr       | 0x14A86D647A425E21 | 31622991 | 1          | CREATE INDEX k_15 ON sbtest15(k)                             |
+| 10        | sbtest     | wr       | 0xF9D03F580356BB68 | 31573312 | 1          | CREATE INDEX k_11 ON sbtest11(k)                             |
+| 10        | sbtest     | wr       | 0xA43F49E4ADA080FB | 31346640 | 1          | CREATE INDEX k_10 ON sbtest10(k)                             |
+| 10        | sbtest     | wr       | 0x922B9C1E888EB4C9 | 29435206 | 1          | CREATE INDEX k_8 ON sbtest8(k)                               |
+| 10        | sbtest     | wr       | 0x409A0DA0B5B6EEF9 | 28482669 | 1          | CREATE INDEX k_2 ON sbtest2(k)                               |
+| 10        | sbtest     | wr       | 0xE4300864715B3688 | 28000903 | 1          | CREATE INDEX k_20 ON sbtest20(k)                             |
+| 10        | sbtest     | wr       | 0x4DE9E56B5EF734F2 | 27918352 | 1          | CREATE INDEX k_6 ON sbtest6(k)                               |
+| 10        | sbtest     | wr       | 0x82CE0656182236D8 | 27909444 | 1          | CREATE INDEX k_12 ON sbtest12(k)                             |
+| 10        | sbtest     | wr       | 0xFE8EAD5ACC9FEEDE | 27273704 | 1          | CREATE INDEX k_18 ON sbtest18(k)                             |
+| 10        | sbtest     | wr       | 0x35A492B2AB47EB41 | 26754664 | 1          | CREATE INDEX k_16 ON sbtest16(k)                             |
+| 10        | sbtest     | wr       | 0xF5B52253F5260086 | 21401807 | 1          | CREATE INDEX k_9 ON sbtest9(k)                               |
+| 10        | sbtest     | wr       | 0xA1B769A0F4E9637C | 21271034 | 1          | CREATE INDEX k_13 ON sbtest13(k)                             |
+| 10        | sbtest     | wr       | 0xFBE6F4A5E871D069 | 21202873 | 1          | CREATE INDEX k_5 ON sbtest5(k)                               |
+| 10        | sbtest     | wr       | 0x004D21922AA0CC4C | 19075137 | 1          | CREATE INDEX k_19 ON sbtest19(k)                             |
+| 10        | sbtest     | wr       | 0x6057175824222B09 | 18110480 | 1          | CREATE INDEX k_14 ON sbtest14(k)                             |
+| 10        | sbtest     | wr       | 0x5143272478FE391F | 5837193  | 1          | INSERT INTO sbtest13(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0xD9E2214392AB9E0D | 2791511  | 1          | INSERT INTO sbtest9(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0x4AC5841F976F5A1A | 1686763  | 2          | CREATE TABLE sbtest5( id INTEGER NOT NULL AUTO_INCREMENT, k  |
+| 10        | sbtest     | wr       | 0x0E320961406063D2 | 1608309  | 1          | INSERT INTO sbtest3(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0x1886E479A84E6EF3 | 1364378  | 1          | INSERT INTO sbtest19(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0xDC0701A550CF81E1 | 1315637  | 2          | CREATE TABLE sbtest14( id INTEGER NOT NULL AUTO_INCREMENT, k |
+| 10        | sbtest     | wr       | 0xDE42F97C93E70D2F | 1213739  | 2          | CREATE TABLE sbtest9( id INTEGER NOT NULL AUTO_INCREMENT, k  |
+| 10        | sbtest     | wr       | 0x69426F34842FCBCB | 1167716  | 1          | INSERT INTO sbtest16(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0x3455DC796FFE13FF | 1096589  | 2          | CREATE TABLE sbtest19( id INTEGER NOT NULL AUTO_INCREMENT, k |
+| 10        | sbtest     | wr       | 0xCB672EA01B2BCC66 | 1059624  | 2          | CREATE TABLE sbtest18( id INTEGER NOT NULL AUTO_INCREMENT, k |
+| 10        | sbtest     | wr       | 0x68A680665F3A4F7F | 1046881  | 1          | INSERT INTO sbtest18(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0x988823E25FA87160 | 1008422  | 2          | CREATE TABLE sbtest7( id INTEGER NOT NULL AUTO_INCREMENT, k  |
+| 10        | sbtest     | wr       | 0x630131CEA842636C | 941575   | 1          | INSERT INTO sbtest17(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0xCFABCFBA3338DFE6 | 883756   | 2          | CREATE TABLE sbtest13( id INTEGER NOT NULL AUTO_INCREMENT, k |
+| 10        | sbtest     | wr       | 0x38C679BD1A2B850D | 800858   | 2          | CREATE TABLE sbtest20( id INTEGER NOT NULL AUTO_INCREMENT, k |
+| 10        | sbtest     | wr       | 0xA8C074E066D84361 | 745750   | 2          | CREATE TABLE sbtest2( id INTEGER NOT NULL AUTO_INCREMENT, k  |
+| 10        | sbtest     | wr       | 0x644F2A01D1AEE6F0 | 618114   | 1          | INSERT INTO sbtest8(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0xA6A432C624F814B1 | 588508   | 1          | INSERT INTO sbtest7(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0xAC072AB4E74DCA04 | 587709   | 1          | INSERT INTO sbtest1(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0x6A5DF2EE9E492E4E | 544548   | 1          | INSERT INTO sbtest4(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0xB483ABDF2ACB307D | 523796   | 2          | CREATE TABLE sbtest16( id INTEGER NOT NULL AUTO_INCREMENT, k |
+| 10        | sbtest     | wr       | 0xDD3B26A209175EF7 | 520238   | 1          | INSERT INTO sbtest10(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0x1061831367EE99C7 | 453881   | 1          | INSERT INTO sbtest14(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0x7F93BDE97051D79A | 440020   | 2          | CREATE TABLE sbtest6( id INTEGER NOT NULL AUTO_INCREMENT, k  |
+| 10        | sbtest     | wr       | 0x806A9CCB80119BE2 | 417349   | 2          | CREATE TABLE sbtest1( id INTEGER NOT NULL AUTO_INCREMENT, k  |
+| 10        | sbtest     | wr       | 0x43CA6E3D0072BCBE | 402073   | 2          | CREATE TABLE sbtest12( id INTEGER NOT NULL AUTO_INCREMENT, k |
+| 10        | sbtest     | wr       | 0xA204975AD230A23B | 400655   | 2          | CREATE TABLE sbtest8( id INTEGER NOT NULL AUTO_INCREMENT, k  |
+| 10        | sbtest     | wr       | 0x11E6BAC23207DD78 | 381162   | 1          | INSERT INTO sbtest2(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0x42B1839D8797EDCB | 379488   | 1          | INSERT INTO sbtest12(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0x583CBA28271C4365 | 357866   | 2          | CREATE TABLE sbtest4( id INTEGER NOT NULL AUTO_INCREMENT, k  |
+| 10        | sbtest     | wr       | 0x6ACC6500F6722004 | 340867   | 2          | CREATE TABLE sbtest15( id INTEGER NOT NULL AUTO_INCREMENT, k |
+| 10        | sbtest     | wr       | 0x5408EB0F722B3B6F | 324340   | 2          | CREATE TABLE sbtest10( id INTEGER NOT NULL AUTO_INCREMENT, k |
+| 10        | sbtest     | wr       | 0xCD3FA57950F3E362 | 293837   | 1          | INSERT INTO sbtest5(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0x4196561D18B78360 | 285839   | 1          | INSERT INTO sbtest20(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0xE7DCF83C81EDEA8D | 265476   | 2          | CREATE TABLE sbtest11( id INTEGER NOT NULL AUTO_INCREMENT, k |
+| 10        | sbtest     | wr       | 0xFA3A3817BE19ABB3 | 250778   | 2          | CREATE TABLE sbtest3( id INTEGER NOT NULL AUTO_INCREMENT, k  |
+| 10        | sbtest     | wr       | 0x6B8F384E1250D83C | 247460   | 2          | CREATE TABLE sbtest17( id INTEGER NOT NULL AUTO_INCREMENT, k |
+| 10        | sbtest     | wr       | 0x26E4B187688CC6BE | 218255   | 1          | INSERT INTO sbtest6(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(?, |
+| 10        | sbtest     | wr       | 0x9E18B2E0420BA351 | 200861   | 1          | INSERT INTO sbtest15(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
+| 10        | sbtest     | wr       | 0xAB7D4ACFF578DC61 | 199109   | 1          | INSERT INTO sbtest11(k, c, pad) VALUES(?, ?, ?),(?, ?, ?),(? |
++-----------+------------+----------+--------------------+----------+------------+--------------------------------------------------------------+
+80 rows in set (0.71 sec)
+
+                                                                                                                                              MySQL [(none)]> SELECT * FROM stats_mysql_commands_counters WHERE Total_cnt;
++-----------------+---------------+-----------+-----------+-----------+---------+---------+----------+----------+-----------+-----------+--------+--------+---------+----------+
+| Command         | Total_Time_us | Total_cnt | cnt_100us | cnt_500us | cnt_1ms | cnt_5ms | cnt_10ms | cnt_50ms | cnt_100ms | cnt_500ms | cnt_1s | cnt_5s | cnt_10s | cnt_INFs |
++-----------------+---------------+-----------+-----------+-----------+---------+---------+----------+----------+-----------+-----------+--------+--------+---------+----------+
+| BEGIN           | 2793013652    | 15681     | 95        | 888       | 1864    | 5806    | 2671     | 2882     | 447       | 266       | 33     | 533    | 190     | 6        |
+| COMMIT          | 4360624460    | 15575     | 3         | 31        | 58      | 191     | 138      | 1031     | 2337      | 9827      | 1369   | 590    | 0       | 0        |
+| CREATE_DATABASE | 99871         | 4         | 0         | 0         | 0       | 2       | 1        | 0        | 1         | 0         | 0      | 0      | 0       | 0        |
+| CREATE_INDEX    | 556762097     | 20        | 0         | 0         | 0       | 0       | 0        | 0        | 0         | 0         | 0      | 0      | 0       | 20       |
+| CREATE_TABLE    | 13849772      | 43        | 0         | 0         | 1       | 0       | 0        | 21       | 1         | 11        | 4      | 5      | 0       | 0        |
+| DELETE          | 603363949     | 14940     | 45        | 197       | 1637    | 5575    | 2424     | 2997     | 771       | 1081      | 136    | 77     | 0       | 0        |
+| INSERT          | 1734742355    | 15812     | 38        | 339       | 1872    | 6251    | 2484     | 2887     | 586       | 590       | 138    | 605    | 21      | 1        |
+| SELECT          | 3704563235    | 319925    | 965       | 12937     | 109961  | 96434   | 40564    | 44484    | 7667      | 6460      | 376    | 77     | 0       | 0        |
+| UPDATE          | 1788596841    | 29900     | 45        | 166       | 2336    | 9589    | 4487     | 6847     | 2123      | 3682      | 445    | 180    | 0       | 0        |
+| SHOW            | 58391         | 2         | 0         | 0         | 0       | 1       | 0        | 0        | 1         | 0         | 0      | 0      | 0       | 0        |
+| UNKNOWN         | 152706        | 3         | 0         | 0         | 0       | 1       | 0        | 1        | 0         | 1         | 0      | 0      | 0       | 0        |
++-----------------+---------------+-----------+-----------+-----------+---------+---------+----------+----------+-----------+-----------+--------+--------+---------+----------+
+11 rows in set (0.11 sec)
+```
+
+可以观察到读写分离的数据。
+
+# 六、故障切换
+
+在Manager节点检查SSH、复制及MHA的状态。
+
+```sql
+docker exec -it MHA-LHR-Monitor-ip134 bash
+masterha_check_ssh --conf=/etc/mha/mha.cnf
+masterha_check_repl --conf=/etc/mha/mha.cnf
+masterha_check_status --conf=/etc/mha/mha.cnf
+
+-- 启动MHA监控进程
+nohup masterha_manager --conf=/etc/mha/mha.cnf  --ignore_last_failover < /dev/null > /usr/local/mha/manager_start.log 2>&1 &
+
+--关闭MHA监控进程
+masterha_stop --conf=/etc/mha/mha.cnf
+
+
+[root@MHA-LHR-Monitor-ip134 /]# masterha_check_status --conf=/etc/mha/mha.cnf
+mha (pid:3738) is running(0:PING_OK), master:192.168.68.131
+```
+
+接下来，宕掉主库，继续观察ProxySQL的情况：
+
+```sql
+ -- 宕掉主库
+ docker stop MHA-LHR-Master1-ip131
+```
+
+MHA自动执行了故障转移，主库切换为132，并发送告警邮件：
+
+![img](https://gitee.com/lhrbest/pic/raw/master/img/20210223163912.png)
+
+此时，来查看ProxySQL的情况：
+
+```sql
+MySQL [(none)]> select * from mysql_servers;
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+| hostgroup_id | hostname       | port | gtid_port | status | weight | compression | max_connections | max_replication_lag | use_ssl | max_latency_ms | comment |
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+| 10           | 192.168.68.132 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.131 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.133 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.132 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+4 rows in set (0.05 sec)
+
+MySQL [(none)]> select * from runtime_mysql_servers;
++--------------+----------------+------+-----------+---------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+| hostgroup_id | hostname       | port | gtid_port | status  | weight | compression | max_connections | max_replication_lag | use_ssl | max_latency_ms | comment |
++--------------+----------------+------+-----------+---------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+| 10           | 192.168.68.132 | 3306 | 0         | ONLINE  | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.131 | 3306 | 0         | SHUNNED | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.133 | 3306 | 0         | ONLINE  | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.132 | 3306 | 0         | ONLINE  | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
++--------------+----------------+------+-----------+---------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+4 rows in set (1.26 sec)
+```
+
+可以发现131已经变成SHUNNED状态，ProxySQL会避开这个主机。
+
+此时再做压测等操作，所有负载会被分配到132和133上，此处不再测试。
+
+接下来启动131，并以从库的身份加入原主从环境：
+
+```sql
+-- 启动131
+docker start MHA-LHR-Master1-ip131
+
+-- 在134的日志文件中找到恢复的语句
+grep "All other slaves should start replication from here" /usr/local/mha/manager_running.log
+
+-- 在131上执行恢复
+mysql -uroot -plhr -h192.168.68.131 -P3306
+CHANGE MASTER TO MASTER_HOST='192.168.68.132', 
+MASTER_PORT=3306, 
+MASTER_AUTO_POSITION=1,
+MASTER_USER='repl',
+MASTER_PASSWORD='lhr';
+
+start slave;
+show slave status \G
+
+-- 设置只读
+set global read_only=1;
+```
+
+查询ProxySQL：
+
+```sql
+MySQL [(none)]> select * from mysql_servers;
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+| hostgroup_id | hostname       | port | gtid_port | status | weight | compression | max_connections | max_replication_lag | use_ssl | max_latency_ms | comment |
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+| 10           | 192.168.68.132 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.131 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.133 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.132 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+4 rows in set (0.06 sec)
+```
+
+可以看到131为只读。若想让132只写，则可以删除相关记录：
+
+```sql
+MySQL [(none)]> delete from mysql_servers where hostgroup_id=20 and  hostname='192.168.68.132';
+Query OK, 1 row affected (0.06 sec)
+
+MySQL [(none)]> load mysql servers to runtime;
+Query OK, 0 rows affected (0.68 sec)
+
+MySQL [(none)]> save mysql servers to disk;
+Query OK, 0 rows affected (0.10 sec)
+
+MySQL [(none)]> select * from mysql_servers;
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+| hostgroup_id | hostname       | port | gtid_port | status | weight | compression | max_connections | max_replication_lag | use_ssl | max_latency_ms | comment |
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+| 10           | 192.168.68.132 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.131 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.133 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+3 rows in set (0.05 sec)
+
+MySQL [(none)]> select * from runtime_mysql_servers;
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+| hostgroup_id | hostname       | port | gtid_port | status | weight | compression | max_connections | max_replication_lag | use_ssl | max_latency_ms | comment |
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+| 10           | 192.168.68.132 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.133 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
+| 20           | 192.168.68.131 | 3306 | 0         | ONLINE | 1      | 0           | 1000            | 0                   | 0       | 0              |         |
++--------------+----------------+------+-----------+--------+--------+-------------+-----------------+---------------------+---------+----------------+---------+
+3 rows in set (0.94 sec)
+```
+
+可以看到132为主库，131和133为从库。Orchestrator界面：
+
+![img](https://gitee.com/lhrbest/pic/raw/master/img/20210224102126.png)
+
+# 七、界面监控结果（ProxySQL本身+PMM监控）
+
+## 7.1 ProxySQL自带监控
+
+ProxySQL监控结果：
+
+![img](https://gitee.com/lhrbest/pic/raw/master/img/20210223125725.png)
+
+![img](https://gitee.com/lhrbest/pic/raw/master/img/20210223125746.png)
+
+## 7.2 PMM监控
+
+监控可以使用ProxySQL本身自动的监控，也可以使用PMM来监控。PMM（Percona Monitoring and  Management）是一个免费的开源平台，用于管理和监视数据库性能，在docker环境中即可运行。它可以主动管理和监控MySQL（AWS  RDS MySQL、Aurora  MySQL、用户自建MySQL实例）、MariaDB、MongoDB、PostgreSQL等数据库，也可以监控ProxySQL中间件，并提供了众多指标与多样告警方式。
+
+PMM监控ProxySQL的命令如下：
+
+```sql
+pmm-admin add proxysql --username=root --password=lhr  --host=192.168.66.35 --port=26032 --service-name=proxysql-192.168.66.35-26032
+```

@@ -1,0 +1,1 @@
+- [MySQL日志收集之Filebeat和Logstsh的一键安装配置（ELK架构）](https://www.cnblogs.com/xuliuzai/p/14486122.html)

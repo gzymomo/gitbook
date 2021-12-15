@@ -1,0 +1,3 @@
+在后端注释if判断，
+ ![在这里插入图片描述](https://img-blog.csdnimg.cn/20210112232119255.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L0RlY2xpbmUx,size_16,color_FFFFFF,t_70)
+ 在前端注释掉验证码校验即可![在这里插入图片描述](https://img-blog.csdnimg.cn/20210112232334740.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L0RlY2xpbmUx,size_16,color_FFFFFF,t_70)![在这里插入图片描述](https://img-blog.csdnimg.cn/20210112232356331.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L0RlY2xpbmUx,size_16,color_FFFFFF,t_70)

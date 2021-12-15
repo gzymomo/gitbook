@@ -1,0 +1,1 @@
+[kube-promethues监控告警详解（邮件、钉钉、微信、自研平台）](https://www.cnblogs.com/skyflask/p/11507017.html)
